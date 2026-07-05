@@ -1,0 +1,10 @@
+numpy
+scipy
+sounddevice
+pyrnnoise
+
+# Optional: heavier CPU-only backend, better quality on hard noise
+# dpdfnet
+
+# Optional: only needed for the GUI (realtime_denoise_gui.py)
+PySide6-Essentials
