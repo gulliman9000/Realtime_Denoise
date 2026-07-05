@@ -246,6 +246,33 @@ class DPDFNetGPUBackend:
         )
 
 
+def apply_min_gain_floor(dry: np.ndarray, wet: np.ndarray, min_gain_db: float) -> np.ndarray:
+    """Limits how much the denoiser is allowed to suppress, sample by sample,
+    instead of letting it gate all the way to silence.
+
+    RNNoise/DPDFNet are confidence-gated: when they're unsure a frame is
+    speech, they can attenuate it almost completely. That's the right call
+    for steady background noise, but it's the wrong call for a fading/weak
+    signal (SSB, distant FM) where the quietest moments are often real
+    speech, not silence -- the model just can't tell the difference at low
+    SNR. This computes the implied per-sample gain (wet/dry) and clamps its
+    *minimum*, so a badly-faded syllable comes through attenuated rather
+    than disappearing. It never touches the *maximum* gain, so normal
+    suppression on genuine noise is unaffected.
+
+    min_gain_db: how far the denoiser is allowed to attenuate, at most.
+    -60 (default) effectively means "no floor" (near-total suppression is
+    still allowed). Try -15 to -20 for fading SSB/weak FM.
+    """
+    if min_gain_db <= -60:
+        return wet
+    min_gain = 10 ** (min_gain_db / 20)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        gain = np.where(np.abs(dry) > 1e-6, wet / dry, 1.0)
+    gain = np.clip(gain, min_gain, None)
+    return (dry * gain).astype(np.float32)
+
+
 def soft_limit(x: np.ndarray, threshold: float = 0.9) -> np.ndarray:
     """Gentle safety limiter: passes signal through untouched below
     `threshold`, then smoothly compresses anything above it with tanh
@@ -323,6 +350,12 @@ def main():
                               "SSB). Lower it (e.g. 0.5-0.7) on already-strong signals (local FM "
                               "repeaters) to reduce neural-denoiser artifacts -- you're asking "
                               "the model to do less work on a signal that barely needs it.")
+    parser.add_argument("--min-gain-db", type=float, default=-60.0,
+                         help="Floor on how much the denoiser may suppress a sample, in dB. "
+                              "-60 = effectively no floor (denoiser can mute near-silent). "
+                              "Try -15 to -20 for fading/weak signals (SSB, distant FM) where "
+                              "the model's own confidence gating can mistake weak real speech "
+                              "for noise-only and cut it entirely.")
     parser.add_argument("--agc", action="store_true", default=True, help="enable AGC (default on)")
     parser.add_argument("--no-agc", dest="agc", action="store_false")
     parser.add_argument("--agc-target", type=float, default=0.15, help="AGC target RMS level (0-1)")
@@ -373,6 +406,7 @@ def main():
     bandpass.enabled = bool(bp_low and bp_high)
 
     strength = min(max(args.strength, 0.0), 1.0)
+    min_gain_db = args.min_gain_db
 
     agc = AGC(
         sample_rate=SAMPLE_RATE,
@@ -403,6 +437,7 @@ def main():
                 chunk = agc.process(chunk)
             pre_denoise = chunk
             chunk = engine.process(chunk)
+            chunk = apply_min_gain_floor(pre_denoise, chunk, min_gain_db)
             if strength < 1.0:
                 chunk = strength * chunk + (1.0 - strength) * pre_denoise
             chunk = soft_limit(chunk)
