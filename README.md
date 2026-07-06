@@ -96,10 +96,9 @@ input -> de-emphasis -> bandpass -> AGC -> denoiser -> min-gain floor -> wet/dry
 
 ## Example Audio
 
-<audio controls style="width: 100%; max-width: 500px;">
-  <source src="https://github.com/gulliman9000/Realtime_Denoise/releases/download/v1.0/Realtime%20Denoise%20Example.mp3" type="audio/mpeg">
-  Your browser does not support the audio element.
-</audio>
+<video controls width="800">
+    <source src="Realtime Denoise Example.mp4" type="video/mp4">
+</video>
 
 ## Notes / known limitations
 
