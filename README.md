@@ -108,3 +108,9 @@ input -> de-emphasis -> bandpass -> AGC -> denoiser -> min-gain floor -> wet/dry
   signals, the bandpass filter and min-gain floor generally help more than
   pushing the neural stage harder.
 - Changing input/output device in the GUI requires Stop then Start.
+
+
+
+<audio controls>
+  <source src="Realtime Denoise Example.mp3" type="audio/mpeg">
+</audio>
