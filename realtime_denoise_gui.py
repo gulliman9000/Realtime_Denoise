@@ -32,7 +32,7 @@ from PySide6.QtGui import QPainter, QColor, QLinearGradient
 
 from realtime_denoise import (
     DeEmphasis, AGC, BandpassFilter, RNNoiseBackend, DPDFNetBackend,
-    soft_limit, apply_min_gain_floor, MODE_PRESETS, SAMPLE_RATE, FRAME_SIZE,
+    soft_limit, MinGainFloor, MODE_PRESETS, SAMPLE_RATE, FRAME_SIZE,
 )
 
 
@@ -104,7 +104,7 @@ class Pipeline:
         self.bandpass.enabled = False
         self.agc = AGC(sample_rate=SAMPLE_RATE)
         self.strength = 1.0
-        self.min_gain_db = -60.0
+        self.min_gain = MinGainFloor(SAMPLE_RATE)
         self.bypass = False
         self.engine = self._make_backend(backend_name, model)
         self.in_level = -60.0
@@ -130,7 +130,7 @@ class Pipeline:
             chunk = self.agc.process(chunk)
             pre_denoise = chunk
             chunk = self.engine.process(chunk)
-            chunk = apply_min_gain_floor(pre_denoise, chunk, self.min_gain_db)
+            chunk = self.min_gain.process(pre_denoise, chunk)
             if self.strength < 1.0:
                 chunk = self.strength * chunk + (1.0 - self.strength) * pre_denoise
             out = soft_limit(chunk)
@@ -330,7 +330,7 @@ class MainWindow(QMainWindow):
         label = "-60 (off)" if value <= -60 else str(value)
         self.min_gain_label.setText(label)
         if self.pipeline:
-            self.pipeline.min_gain_db = float(value)
+            self.pipeline.min_gain.min_gain_db = float(value)
 
     def on_bypass_toggled(self, checked):
         self.bypass_button.setText(f"Bypass: {'ON' if checked else 'OFF'}")
@@ -368,7 +368,7 @@ class MainWindow(QMainWindow):
         self.pipeline.agc.enabled = self.agc_check.isChecked()
         self.pipeline.agc.target = self.agc_target_spin.value()
         self.pipeline.strength = self.strength_slider.value() / 100.0
-        self.pipeline.min_gain_db = float(self.min_gain_slider.value())
+        self.pipeline.min_gain.min_gain_db = float(self.min_gain_slider.value())
         self.pipeline.bypass = self.bypass_button.isChecked()
 
         self.in_buf.clear()

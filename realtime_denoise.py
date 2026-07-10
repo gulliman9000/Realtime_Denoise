@@ -246,31 +246,59 @@ class DPDFNetGPUBackend:
         )
 
 
-def apply_min_gain_floor(dry: np.ndarray, wet: np.ndarray, min_gain_db: float) -> np.ndarray:
-    """Limits how much the denoiser is allowed to suppress, sample by sample,
-    instead of letting it gate all the way to silence.
+class MinGainFloor:
+    """Limits how much the denoiser is allowed to suppress, using smoothed
+    envelopes rather than a raw per-sample amplitude ratio.
 
-    RNNoise/DPDFNet are confidence-gated: when they're unsure a frame is
-    speech, they can attenuate it almost completely. That's the right call
-    for steady background noise, but it's the wrong call for a fading/weak
-    signal (SSB, distant FM) where the quietest moments are often real
-    speech, not silence -- the model just can't tell the difference at low
-    SNR. This computes the implied per-sample gain (wet/dry) and clamps its
-    *minimum*, so a badly-faded syllable comes through attenuated rather
-    than disappearing. It never touches the *maximum* gain, so normal
-    suppression on genuine noise is unaffected.
+    A previous version computed gain as wet[i]/dry[i] sample-by-sample.
+    That's wrong: an audio waveform crosses zero every cycle, so dry[i] is
+    near-zero twice per period regardless of actual signal level, and the
+    ratio spikes to huge, erratic values right at those crossings -- which
+    is exactly the crackling/distortion you'd hear. The fix is standard
+    gate/expander technique: track a smoothed envelope of both dry and wet,
+    take the ratio of the *envelopes* (which don't zero-cross), clip that
+    smooth control signal to a floor, then apply it as a gain multiplier to
+    the raw dry waveform.
 
-    min_gain_db: how far the denoiser is allowed to attenuate, at most.
-    -60 (default) effectively means "no floor" (near-total suppression is
-    still allowed). Try -15 to -20 for fading SSB/weak FM.
+    min_gain_db: floor on suppression depth, in dB. -60 (default) means
+    "no floor" (near-total suppression still allowed). Try -15 to -20 for
+    fading/weak signals where the denoiser's confidence gating can mistake
+    weak real speech for noise-only and mute it entirely.
     """
-    if min_gain_db <= -60:
-        return wet
-    min_gain = 10 ** (min_gain_db / 20)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        gain = np.where(np.abs(dry) > 1e-6, wet / dry, 1.0)
-    gain = np.clip(gain, min_gain, None)
-    return (dry * gain).astype(np.float32)
+
+    def __init__(self, sample_rate: int, min_gain_db: float = -60.0,
+                 attack_ms: float = 5.0, release_ms: float = 50.0):
+        self.min_gain_db = min_gain_db
+        self._attack = np.exp(-1.0 / (sample_rate * attack_ms / 1000))
+        self._release = np.exp(-1.0 / (sample_rate * release_ms / 1000))
+        self._dry_env = 0.0
+        self._wet_env = 0.0
+
+    def reset(self):
+        self._dry_env = 0.0
+        self._wet_env = 0.0
+
+    @staticmethod
+    def _update_envelope(env: float, rectified: float, attack: float, release: float) -> float:
+        coeff = attack if rectified > env else release
+        return coeff * env + (1 - coeff) * rectified
+
+    def process(self, dry: np.ndarray, wet: np.ndarray) -> np.ndarray:
+        if self.min_gain_db <= -60:
+            return wet
+        min_gain = 10 ** (self.min_gain_db / 20)
+        y = np.empty_like(wet)
+        dry_env = self._dry_env
+        wet_env = self._wet_env
+        for i in range(len(wet)):
+            dry_env = self._update_envelope(dry_env, abs(dry[i]), self._attack, self._release)
+            wet_env = self._update_envelope(wet_env, abs(wet[i]), self._attack, self._release)
+            gain = wet_env / max(dry_env, 1e-6)
+            gain = max(gain, min_gain)
+            y[i] = dry[i] * gain
+        self._dry_env = dry_env
+        self._wet_env = wet_env
+        return y.astype(np.float32)
 
 
 def soft_limit(x: np.ndarray, threshold: float = 0.9) -> np.ndarray:
@@ -406,7 +434,7 @@ def main():
     bandpass.enabled = bool(bp_low and bp_high)
 
     strength = min(max(args.strength, 0.0), 1.0)
-    min_gain_db = args.min_gain_db
+    min_gain = MinGainFloor(SAMPLE_RATE, min_gain_db=args.min_gain_db)
 
     agc = AGC(
         sample_rate=SAMPLE_RATE,
@@ -437,7 +465,7 @@ def main():
                 chunk = agc.process(chunk)
             pre_denoise = chunk
             chunk = engine.process(chunk)
-            chunk = apply_min_gain_floor(pre_denoise, chunk, min_gain_db)
+            chunk = min_gain.process(pre_denoise, chunk)
             if strength < 1.0:
                 chunk = strength * chunk + (1.0 - strength) * pre_denoise
             chunk = soft_limit(chunk)
